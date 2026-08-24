@@ -6,6 +6,7 @@
 ## 📖 今日阅读
 
 <!-- DIGEST-LIST:START -->
+- [2026-08-25](daily/2026-08-25.md)
 - [2026-08-24](daily/2026-08-24.md)
 <!-- DIGEST-LIST:END -->
 
