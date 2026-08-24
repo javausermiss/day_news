@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-每日精选生成器
+每日精选生成器 v2（全文版）
 - 读取 feeds.yaml 里的 RSS 源
 - 抓取、去重、按时间过滤
-- 可选：DeepSeek AI 摘要（无 Key 时退回原文简介）
-- 生成 daily/YYYY-MM-DD.md 并更新 README 里的「今日阅读」列表
+- 用 trafilatura 抓取文章全文（失败则降级为 RSS 简介）
+- 用 DeepSeek 对全文生成 AI 总结，附在文章最后一段
+- 生成 daily/YYYY-MM-DD.md（全文用 <details> 折叠收纳）并更新 README
 """
 import html
 import os
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 import feedparser
 import requests
+import trafilatura
 import yaml
-
-# Windows 控制台默认 GBK，强制 UTF-8 输出，避免打印符号报错
-if sys.stdout.encoding and "utf" not in sys.stdout.encoding.lower():
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 BEIJING = timezone(timedelta(hours=8))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DAILY_DIR = os.path.join(ROOT, "daily")
-HEADERS = {"User-Agent": "Mozilla/5.0 (daily-reads; RSS digest bot)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+}
+FULLTEXT_MAX = 6000  # 全文展示与总结的正文上限（字符）
 
-
-def fetch_feed(url: str, timeout: int = 20) -> feedparser.FeedParserDict:
-    resp = requests.get(url, headers=HEADERS, timeout=timeout)
-    resp.raise_for_status()
-    return feedparser.parse(resp.content)
+# Windows 控制台默认 GBK，强制 UTF-8 输出
+if sys.stdout.encoding and "utf" not in sys.stdout.encoding.lower():
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 
 def clean(text, limit: int = 160) -> str:
@@ -40,18 +41,40 @@ def clean(text, limit: int = 160) -> str:
         return ""
     text = html.unescape(str(text))
     text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"Announce Type:[^\n]*", "", text, flags=re.I)  # 去掉 arXiv 的公告噪音
-    text = re.sub(r"^\s*Abstract:\s*", "", text)  # 去掉开头的 Abstract: 前缀
+    text = re.sub(r"Announce Type:[^\n]*", "", text, flags=re.I)
+    text = re.sub(r"^\s*Abstract:\s*", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) > limit:
         text = text[:limit].rstrip() + "…"
     return text
 
 
-def ai_summary(title: str, desc: str, api_key: str) -> str:
-    """用 DeepSeek 生成一句中文摘要；失败或没 Key 则退回原文简介。"""
-    if not api_key:
-        return clean(desc, 120)
+def fetch_feed(url: str, timeout: int = 20) -> feedparser.FeedParserDict:
+    resp = requests.get(url, headers=HEADERS, timeout=timeout)
+    resp.raise_for_status()
+    return feedparser.parse(resp.content)
+
+
+def fetch_fulltext(url: str):
+    """抓取网页正文；失败或太短返回 None。"""
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        if resp.status_code != 200:
+            return None
+        text = trafilatura.extract(resp.text, include_comments=False, include_tables=False)
+        if text:
+            text = text.strip()
+            if len(text) >= 200:  # 太短视为抓取失败（可能是登录墙/JS 页）
+                return text[:FULLTEXT_MAX]
+    except Exception:
+        pass
+    return None
+
+
+def ai_summary(title: str, content: str, api_key: str) -> str:
+    """对全文生成一段中文总结；失败或没 Key 返回空串。"""
+    if not api_key or not content:
+        return ""
     try:
         resp = requests.post(
             "https://api.deepseek.com/chat/completions",
@@ -64,24 +87,31 @@ def ai_summary(title: str, desc: str, api_key: str) -> str:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "你是每日阅读助手。用一句不超过40字的中文概括这篇科技文章的核心内容。直接输出概括，不要任何前缀或引号。",
+                        "content": "你是资深科技编辑。阅读下面这篇文章，用一段 100~150 字的中文总结其核心内容与亮点。直接输出总结正文，不要任何前缀或引号。",
                     },
                     {
                         "role": "user",
-                        "content": f"标题：{title}\n简介：{clean(desc, 400)}",
+                        "content": f"标题：{title}\n\n正文：\n{content}",
                     },
                 ],
-                "max_tokens": 100,
+                "max_tokens": 300,
                 "temperature": 0.3,
             },
-            timeout=30,
+            timeout=60,
         )
         resp.raise_for_status()
-        summary = resp.json()["choices"][0]["message"]["content"].strip()
-        return summary if summary else clean(desc, 120)
-    except Exception as exc:  # 摘要失败不影响整体
-        print(f"  (AI 摘要失败: {exc})")
-        return clean(desc, 120)
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as exc:
+        print(f"  (AI 总结失败: {exc})")
+        return ""
+
+
+def process_item(item: dict, api_key: str) -> dict:
+    """抓全文 → 生成 AI 总结。"""
+    fulltext = fetch_fulltext(item["link"])
+    item["fulltext"] = fulltext
+    item["summary"] = ai_summary(item["title"], fulltext, api_key) if fulltext else ""
+    return item
 
 
 def main() -> int:
@@ -101,6 +131,7 @@ def main() -> int:
     seen_links = set()
     errors = []
 
+    # 1) 抓 RSS
     for feed in cfg.get("feeds", []):
         name = feed.get("name", "未命名")
         url = feed.get("url", "")
@@ -124,7 +155,6 @@ def main() -> int:
             if any(k in title.lower() for k in exclude_keywords):
                 continue
 
-            # 发布时间：优先 published，其次 updated，缺失则视为今天
             ts = None
             for key in ("published_parsed", "updated_parsed"):
                 raw = entry.get(key)
@@ -142,22 +172,41 @@ def main() -> int:
                     "feed": name,
                     "title": title,
                     "link": link,
-                    "desc": ai_summary(title, entry.get("summary", ""), api_key),
+                    "desc": clean(entry.get("summary", ""), 120),
                     "time": ts.astimezone(BEIJING).strftime("%m-%d %H:%M"),
                 }
             )
             count += 1
-        time.sleep(0.5)  # 对源网站友好一点
+        time.sleep(0.3)
 
     items.sort(key=lambda x: x["time"], reverse=True)
     items = items[:max_total]
 
+    # 2) 并发抓全文 + AI 总结
+    print(f"▶ 抓全文 + AI 总结（{len(items)} 篇，并发 6）...")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = [pool.submit(process_item, it, api_key) for it in items]
+        done = 0
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as exc:
+                print(f"  (处理失败: {exc})")
+            done += 1
+            print(f"  … {done}/{len(items)}")
+    n_full = sum(1 for it in items if it["fulltext"])
+    n_sum = sum(1 for it in items if it["summary"])
+    print(f"✅ 全文抓取成功 {n_full}/{len(items)}，AI 总结 {n_sum} 篇")
+
+    # 3) 生成日报
     date_str = now.strftime("%Y-%m-%d")
     lines = [
         f"# 📰 每日精选 {date_str}",
         "",
         f"> 共 {len(items)} 篇 · 生成于 {now.strftime('%H:%M')}"
-        + (" · ✨ AI 中文摘要" if api_key else " · 原文简介"),
+        + (f" · 📄 全文 {n_full} 篇" if n_full else "")
+        + (f" · ✨ AI 总结 {n_sum} 篇" if n_sum else "")
+        + ("" if api_key else " · （未启用 AI）"),
     ]
     if errors:
         lines.append("")
@@ -172,16 +221,30 @@ def main() -> int:
         lines.append("")
         for it in feed_items:
             lines.append(f"- [{it['title']}]({it['link']}) <sub>{it['time']}</sub>")
-            lines.append(f"  {it['desc']}")
-        lines.append("")
+            lines.append("")
+            if it["fulltext"]:
+                lines.append("<details>")
+                lines.append(f"<summary>📄 展开阅读全文（{len(it['fulltext'])} 字）</summary>")
+                lines.append("")
+                lines.append(it["fulltext"])
+                if it["summary"]:
+                    lines.append("")
+                    lines.append("---")
+                    lines.append("")
+                    lines.append(f"**🤖 AI 总结：** {it['summary']}")
+                lines.append("")
+                lines.append("</details>")
+            else:
+                lines.append("<sub>⚠️ 全文抓取失败，可点击标题回原文查看</sub>")
+            lines.append("")
 
     os.makedirs(DAILY_DIR, exist_ok=True)
     digest_path = os.path.join(DAILY_DIR, f"{date_str}.md")
     with open(digest_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    print(f"✅ 已生成: {digest_path} ({len(items)} 篇)")
+    print(f"✅ 已生成: {digest_path}")
 
-    # 更新 README 里的「今日阅读」列表
+    # 4) 更新 README
     readme_path = os.path.join(ROOT, "README.md")
     with open(readme_path, encoding="utf-8") as f:
         readme = f.read()
