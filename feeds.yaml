@@ -43,3 +43,4 @@ settings:
   max_age_days: 3          # 只保留最近 3 天的文章
   max_total: 40            # 每天最多收录 40 条
   exclude_keywords: []     # 标题含这些词的文章会被跳过，如 ["广告", "sponsored"]
+
