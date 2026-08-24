@@ -1,0 +1,45 @@
+# ============================================
+# 📡 每日精选 · 来源配置
+# 想增删来源，直接改这里，保存后自动重新生成日报
+# ============================================
+
+feeds:
+  - name: Hacker News 首页
+    url: https://hnrss.org/frontpage
+    max_items: 12
+
+  - name: GitHub 今日趋势
+    url: https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml
+    max_items: 8
+
+  - name: 阮一峰的网络日志
+    url: http://www.ruanyifeng.com/blog/atom.xml
+    max_items: 5
+
+  - name: 少数派
+    url: https://sspai.com/feed
+    max_items: 5
+
+  - name: 36氪
+    url: https://36kr.com/feed
+    max_items: 5
+
+  - name: arXiv AI 最新论文
+    url: https://rss.arxiv.org/rss/cs.AI
+    max_items: 8
+
+  - name: MIT 科技评论
+    url: https://www.technologyreview.com/feed/
+    max_items: 5
+
+  - name: Nature 头条
+    url: https://www.nature.com/nature.rss
+    max_items: 3
+
+# ============================================
+# ⚙️ 全局设置
+# ============================================
+settings:
+  max_age_days: 3          # 只保留最近 3 天的文章
+  max_total: 40            # 每天最多收录 40 条
+  exclude_keywords: []     # 标题含这些词的文章会被跳过，如 ["广告", "sponsored"]
